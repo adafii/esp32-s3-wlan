@@ -1,0 +1,15 @@
+menu "WiFi Configuration"
+
+    config ESP_WIFI_SSID
+        string "WiFi SSID"
+        default "ssid"
+        help
+            Access point SSID
+
+    config ESP_WIFI_PSK
+        string "WiFi Password"
+        default "password"
+        help
+            WiFi PSK
+
+endmenu

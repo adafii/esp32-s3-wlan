@@ -84,6 +84,11 @@ esp_err_t scan() {
     return ESP_OK;
 }
 
+esp_err_t connect() {
+
+    return ESP_OK;
+}
+
 void test() {
     init();
     scan();
