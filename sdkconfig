@@ -509,13 +509,6 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
-# WiFi Configuration
-#
-CONFIG_ESP_WIFI_SSID="Monstera"
-CONFIG_ESP_WIFI_PSK=""
-# end of WiFi Configuration
-
-#
 # Compiler options
 #
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
