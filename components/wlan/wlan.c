@@ -3,24 +3,21 @@
 #include "nvs_flash.h"
 #include <stdio.h>
 
-// Init NVS and wifi
-esp_err_t init() {
-    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+//static const char* TAG = "wlan";
 
-    ESP_ERROR_CHECK(nvs_flash_init());
-
-    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    return ESP_OK;
-};
-
+// Private API definitions
 typedef struct {
-    int8_t len;
-    char const* title;
-} column;
+    const char* ssid;
+    const char* wpa_psk;
+} wlan_config_t;
 
+char const* get_auth_type(wifi_auth_mode_t auth);
+esp_err_t init();
+esp_err_t scan();
+esp_err_t get_wlan_config(wlan_config_t* wlan_config);
+esp_err_t connect();
+
+// Auth mode type to string
 char const* get_auth_type(wifi_auth_mode_t auth) {
     switch (auth) {
         case WIFI_AUTH_OPEN:
@@ -40,7 +37,26 @@ char const* get_auth_type(wifi_auth_mode_t auth) {
     }
 }
 
-// Test wifi by scanning local wlans
+// Init nvs and wifi
+esp_err_t init() {
+    esp_err_t nvs_error = nvs_flash_init();
+
+    if (nvs_error == ESP_ERR_NVS_NO_FREE_PAGES || nvs_error == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_error = nvs_flash_init();
+    }
+
+    ESP_ERROR_CHECK(nvs_error);
+
+    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    return ESP_OK;
+};
+
+// Scan local wlans
 esp_err_t scan() {
     wifi_scan_config_t scan_config = {
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
@@ -58,6 +74,11 @@ esp_err_t scan() {
 
     wifi_ap_record_t* ap_records = calloc(ap_num, sizeof(wifi_ap_record_t));
     ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_num, ap_records));
+
+    typedef struct {
+        int8_t len;
+        char const* title;
+    } column;
 
     column const columns[] = {{19, "bssid"}, {20, "ssid"}, {10, "channel"}, {10, "rssi"}, {10, "auth"}};
 
@@ -84,12 +105,33 @@ esp_err_t scan() {
     return ESP_OK;
 }
 
-esp_err_t connect() {
+char* read_nvs_str(const nvs_handle_t* handle, const char* key) {
+    size_t value_size;
+    ESP_ERROR_CHECK(nvs_get_str(*handle, key, NULL, &value_size));
+    char* str = malloc(value_size);
+    ESP_ERROR_CHECK(nvs_get_str(*handle, key, str, &value_size));
 
+    return str;
+}
+
+esp_err_t get_wlan_config(wlan_config_t* wlan_config) {
+    nvs_handle_t nvs_handle = {};
+    ESP_ERROR_CHECK(nvs_open("wlan_config", NVS_READONLY, &nvs_handle));
+
+    wlan_config->ssid = read_nvs_str(&nvs_handle, "ssid");
+    wlan_config->wpa_psk = read_nvs_str(&nvs_handle, "wpa_psk");
+
+    return ESP_OK;
+}
+
+esp_err_t connect() {
     return ESP_OK;
 }
 
 void test() {
     init();
-    scan();
+    wlan_config_t wlan_config = {};
+    get_wlan_config(&wlan_config);
+    printf("SSID: %s\n", wlan_config.ssid);
+    printf("WPA PSK: %s\n", wlan_config.wpa_psk);
 }
