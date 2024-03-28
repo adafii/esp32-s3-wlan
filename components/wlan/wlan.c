@@ -1,9 +1,10 @@
 #include "esp_err.h"
+#include "esp_log.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include <stdio.h>
 
-//static const char* TAG = "wlan";
+static const char* TAG = "wlan";
 
 // Private API definitions
 typedef struct {
@@ -11,11 +12,13 @@ typedef struct {
     const char* wpa_psk;
 } wlan_config_t;
 
-char const* get_auth_type(wifi_auth_mode_t auth);
 esp_err_t init();
-esp_err_t scan();
-esp_err_t get_wlan_config(wlan_config_t* wlan_config);
+esp_err_t scan(wifi_ap_record_t** ap_records, uint16_t* ap_num);
 esp_err_t connect();
+
+char const* get_auth_type(wifi_auth_mode_t auth);
+void print_ap_record(const wifi_ap_record_t ap_records[], const uint16_t* ap_num);
+esp_err_t get_wlan_config(wlan_config_t* wlan_config);
 
 // Auth mode type to string
 char const* get_auth_type(wifi_auth_mode_t auth) {
@@ -56,24 +59,10 @@ esp_err_t init() {
     return ESP_OK;
 };
 
-// Scan local wlans
-esp_err_t scan() {
-    wifi_scan_config_t scan_config = {
-        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-        .scan_time = {.active = {.min = 1000, .max = 1500}},
-    };
-
-    puts("------------------------------------------------------------------------");
-
-    printf("Scanning...\n");
-    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
-
-    uint16_t ap_num = 0;
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_num));
-    printf("APs found: %d\n\n", ap_num);
-
-    wifi_ap_record_t* ap_records = calloc(ap_num, sizeof(wifi_ap_record_t));
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_num, ap_records));
+void print_ap_record(const wifi_ap_record_t* ap_records, const uint16_t* ap_num) {
+    if (!ap_records || *ap_num == 0) {
+        return;
+    }
 
     typedef struct {
         int8_t len;
@@ -88,20 +77,34 @@ esp_err_t scan() {
 
     puts("");
 
-    for (int i = 0; i < ap_num; ++i) {
-        printf("  %.2x:%.2x:%.2x:%.2x:%.2x:%.2x", ap_records[i].bssid[0], ap_records[i].bssid[1],
-               ap_records[i].bssid[2], ap_records[i].bssid[3], ap_records[i].bssid[4], ap_records[i].bssid[5]);
-        printf("%*.*s", columns[1].len, columns[1].len, ap_records[i].ssid);
-        printf("%*d", columns[2].len, ap_records[i].primary);
-        printf("%*d", columns[3].len, ap_records[i].rssi);
-        printf("%*.*s", columns[4].len, columns[4].len, get_auth_type(ap_records[i].authmode));
-        puts("");
+    for (int ap = 0; ap < *ap_num; ++ap) {
+        printf("  %.2x:%.2x:%.2x:%.2x:%.2x:%.2x", ap_records[ap].bssid[0], ap_records[ap].bssid[1],
+               ap_records[ap].bssid[2], ap_records[ap].bssid[3], ap_records[ap].bssid[4], ap_records[ap].bssid[5]);
+        printf("%*.*s", columns[1].len, columns[1].len, ap_records[ap].ssid);
+        printf("%*d", columns[2].len, ap_records[ap].primary);
+        printf("%*d", columns[3].len, ap_records[ap].rssi);
+        printf("%*.*s\n", columns[4].len, columns[4].len, get_auth_type(ap_records[ap].authmode));
     }
 
     puts("");
+}
 
-    free(ap_records);
+// Scan local wlans
+esp_err_t scan(wifi_ap_record_t** ap_records, uint16_t* ap_num) {
+    static wifi_scan_config_t scan_config = {
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = {.active = {.min = 1000, .max = 1500}},
+    };
 
+    ESP_LOGI(TAG, "Scanning...\n");
+    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
+
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(ap_num));
+    ESP_LOGI(TAG, "APs found: %d\n\n", *ap_num);
+
+    *ap_records = calloc(*ap_num, sizeof(**ap_records));
+
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(ap_num, *ap_records));
     return ESP_OK;
 }
 
@@ -130,8 +133,15 @@ esp_err_t connect() {
 
 void test() {
     init();
-    wlan_config_t wlan_config = {};
-    get_wlan_config(&wlan_config);
-    printf("SSID: %s\n", wlan_config.ssid);
-    printf("WPA PSK: %s\n", wlan_config.wpa_psk);
+    wifi_ap_record_t* ap_records = NULL;
+    uint16_t ap_num = 0;
+
+    scan(&ap_records, &ap_num);
+    print_ap_record(ap_records, &ap_num);
+    free(ap_records);
+
+    /*    wlan_config_t wlan_config = {};
+        get_wlan_config(&wlan_config);
+        printf("SSID: %s\n", wlan_config.ssid);
+        printf("WPA PSK: %s\n", wlan_config.wpa_psk);*/
 }
