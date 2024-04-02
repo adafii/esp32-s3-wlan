@@ -171,21 +171,23 @@ esp_err_t connect(const nvs_wifi_config_t* config) {
     ESP_ERROR_CHECK(
         esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
 
-    wifi_config_t wifi_config = {.sta.threshold.authmode = WIFI_AUTH_WPA_WPA2_PSK};
+    wifi_config_t wifi_config = {.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK, };
     strncpy((char*)(&wifi_config.sta.ssid), config->ssid, 32);
     strncpy((char*)(&wifi_config.sta.password), config->wpa_psk, 32);
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_stop());
+    ESP_ERROR_CHECK(esp_wifi_start());
 
     EventBits_t bits =
         xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "connected to ap SSID: %s", config->ssid);
+        ESP_LOGI(TAG, "Connected to ap SSID: %s", config->ssid);
     } else if (bits & WIFI_FAIL_BIT) {
         ESP_LOGI(TAG, "Failed to connect to SSID: %s", config->ssid);
     } else {
-        ESP_LOGE(TAG, "UNEXPECTED EVENT");
+        ESP_LOGE(TAG, "Unexpected event");
     }
 
     return ESP_OK;
@@ -193,10 +195,10 @@ esp_err_t connect(const nvs_wifi_config_t* config) {
 
 void test() {
     init();
-    wifi_ap_record_t* ap_records = NULL;
+/*    wifi_ap_record_t* ap_records = NULL;
     uint16_t ap_num = 0;
 
-/*    scan(&ap_records, &ap_num);
+    scan(&ap_records, &ap_num);
     print_ap_record(ap_records, &ap_num);
     free(ap_records);*/
 
