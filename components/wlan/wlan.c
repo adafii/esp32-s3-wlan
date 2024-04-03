@@ -223,6 +223,13 @@ void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
     }
 }
 
+void print_packets(void* user) {
+    for (;;) {
+        printf("MGMT %lu CTRL %lu DATA %lu MISC %lu\n", packet_counter.management, packet_counter.control, packet_counter.data, packet_counter.misc);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+}
+
 esp_err_t sniff() {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
 
@@ -231,6 +238,8 @@ esp_err_t sniff() {
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_ctrl_filter(&prom_filter));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
+
+    xTaskCreatePinnedToCore(print_packets, "Prints packets", 10 * 1024, NULL, 0, NULL, 1);
 
     return ESP_OK;
 }
