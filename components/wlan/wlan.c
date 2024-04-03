@@ -8,6 +8,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT BIT1
+
+static int s_retry_num = 0;
+static EventGroupHandle_t s_wifi_event_group;
 static const char* TAG = "wlan";
 
 // Private API definitions
@@ -19,6 +24,7 @@ typedef struct {
 esp_err_t init();
 esp_err_t scan(wifi_ap_record_t** ap_records, uint16_t* ap_num);
 esp_err_t connect(const nvs_wifi_config_t* config);
+esp_err_t sniff();
 
 char const* get_auth_type(wifi_auth_mode_t auth);
 void print_ap_record(const wifi_ap_record_t ap_records[], const uint16_t* ap_num);
@@ -131,11 +137,6 @@ esp_err_t get_wlan_config(nvs_wifi_config_t* wlan_config) {
     return ESP_OK;
 }
 
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT BIT1
-static int s_retry_num = 0;
-static EventGroupHandle_t s_wifi_event_group;
-
 static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
@@ -143,14 +144,14 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
         if (s_retry_num < 4) {
             esp_wifi_connect();
             s_retry_num++;
-            ESP_LOGI(TAG, "retry to connect to the AP");
+            ESP_LOGI(TAG, "Retry to connect to the AP");
         } else {
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
-        ESP_LOGI(TAG, "connect to the AP fail");
+        ESP_LOGI(TAG, "Connect to the AP fail");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*)event_data;
-        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "Got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -171,11 +172,14 @@ esp_err_t connect(const nvs_wifi_config_t* config) {
     ESP_ERROR_CHECK(
         esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
 
-    wifi_config_t wifi_config = {.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK, };
+    wifi_config_t wifi_config = {
+        .sta.threshold.authmode = WIFI_AUTH_WPA2_PSK,
+    };
     strncpy((char*)(&wifi_config.sta.ssid), config->ssid, 32);
     strncpy((char*)(&wifi_config.sta.password), config->wpa_psk, 32);
 
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_stop());
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -193,16 +197,57 @@ esp_err_t connect(const nvs_wifi_config_t* config) {
     return ESP_OK;
 }
 
+typedef struct {
+    uint32_t management;
+    uint32_t control;
+    uint32_t data;
+    uint32_t misc;
+} packet_counter_t;
+
+static packet_counter_t packet_counter;
+
+void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
+    switch (type) {
+        case WIFI_PKT_MGMT:
+            packet_counter.management++;
+            break;
+        case WIFI_PKT_CTRL:
+            packet_counter.control++;
+            break;
+        case WIFI_PKT_DATA:
+            packet_counter.data++;
+            break;
+        case WIFI_PKT_MISC:
+            packet_counter.misc++;
+            break;
+    }
+}
+
+esp_err_t sniff() {
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+
+    wifi_promiscuous_filter_t prom_filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL};
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&prom_filter));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_ctrl_filter(&prom_filter));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
+
+    return ESP_OK;
+}
+
 void test() {
     init();
-/*    wifi_ap_record_t* ap_records = NULL;
-    uint16_t ap_num = 0;
+    sniff();
 
+    /*
+    wifi_ap_record_t* ap_records = NULL;
+    uint16_t ap_num = 0;
     scan(&ap_records, &ap_num);
     print_ap_record(ap_records, &ap_num);
-    free(ap_records);*/
+    free(ap_records);
 
     nvs_wifi_config_t nvs_wifi_config = {};
     get_wlan_config(&nvs_wifi_config);
     ESP_ERROR_CHECK(connect(&nvs_wifi_config));
+     */
 }
