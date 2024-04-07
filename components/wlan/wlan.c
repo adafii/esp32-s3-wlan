@@ -197,40 +197,32 @@ esp_err_t connect(const nvs_wifi_config_t* config) {
     return ESP_OK;
 }
 
-typedef struct {
-    uint32_t management;
-    uint32_t control;
-    uint32_t data;
-    uint32_t misc;
-} packet_counter_t;
-
-static packet_counter_t packet_counter;
+QueueHandle_t packet_queue;
 
 void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
-    switch (type) {
-        case WIFI_PKT_MGMT:
-            packet_counter.management++;
-            break;
-        case WIFI_PKT_CTRL:
-            packet_counter.control++;
-            break;
-        case WIFI_PKT_DATA:
-            packet_counter.data++;
-            break;
-        case WIFI_PKT_MISC:
-            packet_counter.misc++;
-            break;
+    wifi_pkt_rx_ctrl_t* packet_header = malloc(sizeof(wifi_pkt_rx_ctrl_t));
+    memcpy(packet_header, buffer, sizeof(wifi_pkt_rx_ctrl_t));
+    if (xQueueSendToBack(packet_queue, &packet_header, 0) != pdPASS) {
+        ESP_LOGW(TAG, "Queue full, packet dropped");
     }
 }
 
-void print_packets(void* user) {
+void print_packets_task(void* user) {
+    wifi_pkt_rx_ctrl_t* packet_header = NULL;
     for (;;) {
-        printf("MGMT %lu CTRL %lu DATA %lu MISC %lu\n", packet_counter.management, packet_counter.control, packet_counter.data, packet_counter.misc);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        if (xQueueReceive(packet_queue, &packet_header, 10) != pdPASS) {
+            continue;
+        }
+
+        printf("RSSI: %d, channel: %d\n", packet_header->rssi, packet_header->channel);
+        free(packet_header);
     }
 }
 
 esp_err_t sniff() {
+    packet_queue = xQueueCreate(30, sizeof(wifi_pkt_rx_ctrl_t*));
+    vQueueAddToRegistry(packet_queue, "Packet queue");
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
 
     wifi_promiscuous_filter_t prom_filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL};
@@ -239,14 +231,18 @@ esp_err_t sniff() {
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
 
-    xTaskCreatePinnedToCore(print_packets, "Prints packets", 10 * 1024, NULL, 0, NULL, 1);
+    BaseType_t task_err = xTaskCreatePinnedToCore(print_packets_task, "Prints packets", 10 * 1024, NULL, 10, NULL, 1);
+
+    if (task_err != pdPASS) {
+        return ESP_FAIL;
+    }
 
     return ESP_OK;
 }
 
 void test() {
-    init();
-    sniff();
+    ESP_ERROR_CHECK(init());
+    ESP_ERROR_CHECK(sniff());
 
     /*
     wifi_ap_record_t* ap_records = NULL;
