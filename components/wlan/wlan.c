@@ -10,6 +10,7 @@
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
+#define SNIFF_CHANNEL 5
 
 static int s_retry_num = 0;
 static EventGroupHandle_t s_wifi_event_group;
@@ -197,33 +198,81 @@ esp_err_t connect(const nvs_wifi_config_t* config) {
     return ESP_OK;
 }
 
-QueueHandle_t packet_queue;
+typedef struct {
+    wifi_promiscuous_pkt_type_t type;
+    wifi_pkt_rx_ctrl_t* header;
+    uint8_t* data;
+} packet_t;
+
+static QueueHandle_t packet_queue;
 
 void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
-    wifi_pkt_rx_ctrl_t* packet_header = malloc(sizeof(wifi_pkt_rx_ctrl_t));
-    memcpy(packet_header, buffer, sizeof(wifi_pkt_rx_ctrl_t));
-    if (xQueueSendToBack(packet_queue, &packet_header, 0) != pdPASS) {
+    packet_t received_packet = {};
+
+    received_packet.type = type;
+    received_packet.header = malloc(sizeof(wifi_pkt_rx_ctrl_t));
+    memcpy(received_packet.header, buffer, sizeof(wifi_pkt_rx_ctrl_t));
+
+    uint32_t data_offset = sizeof(wifi_pkt_rx_ctrl_t);
+    size_t data_len = received_packet.header->sig_len;
+    if (data_len > 0) {
+        received_packet.data = malloc(data_len);
+        memcpy(received_packet.data, buffer + data_offset, data_len);
+    }
+
+    if (xQueueSendToBack(packet_queue, &received_packet, 0) != pdPASS) {
         ESP_LOGW(TAG, "Queue full, packet dropped");
     }
 }
 
 void print_packets_task(void* user) {
-    wifi_pkt_rx_ctrl_t* packet_header = NULL;
+    packet_t received_packet = {};
     for (;;) {
-        if (xQueueReceive(packet_queue, &packet_header, 10) != pdPASS) {
+        if (xQueueReceive(packet_queue, &received_packet, 10) != pdPASS) {
             continue;
         }
 
-        printf("RSSI: %d, channel: %d\n", packet_header->rssi, packet_header->channel);
-        free(packet_header);
+        switch (received_packet.type) {
+            case WIFI_PKT_MGMT:
+                printf("MGMT");
+                break;
+            case WIFI_PKT_CTRL:
+                printf("CTRL");
+                break;
+            case WIFI_PKT_DATA:
+                printf("DATA");
+                break;
+            case WIFI_PKT_MISC:
+                printf("MISC");
+                break;
+        }
+
+        wifi_pkt_rx_ctrl_t* header = received_packet.header;
+        printf(" - RSSI: %d, channel: %d, length: %d\n", header->rssi, header->channel, header->sig_len);
+        free(header);
+
+        uint8_t* data = received_packet.data;
+        size_t data_len = received_packet.header->sig_len;
+
+        for(size_t i = 0; i < data_len; ++i) {
+            char chr = (char)data[i];
+            if (chr > 32 && chr < 127) {
+                printf("%c", chr);
+            }
+        }
+
+        printf("\n");
+
+        free(data);
     }
 }
 
 esp_err_t sniff() {
-    packet_queue = xQueueCreate(30, sizeof(wifi_pkt_rx_ctrl_t*));
+    packet_queue = xQueueCreate(30, sizeof(packet_t));
     vQueueAddToRegistry(packet_queue, "Packet queue");
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+    ESP_ERROR_CHECK(esp_wifi_set_channel(SNIFF_CHANNEL, 0));
 
     wifi_promiscuous_filter_t prom_filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL};
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&prom_filter));
@@ -242,17 +291,20 @@ esp_err_t sniff() {
 
 void test() {
     ESP_ERROR_CHECK(init());
+
+    /*
+        wifi_ap_record_t* ap_records = NULL;
+        uint16_t ap_num = 0;
+        ESP_ERROR_CHECK(scan(&ap_records, &ap_num));
+        print_ap_record(ap_records, &ap_num);
+        free(ap_records);
+    */
+
     ESP_ERROR_CHECK(sniff());
 
     /*
-    wifi_ap_record_t* ap_records = NULL;
-    uint16_t ap_num = 0;
-    scan(&ap_records, &ap_num);
-    print_ap_record(ap_records, &ap_num);
-    free(ap_records);
-
-    nvs_wifi_config_t nvs_wifi_config = {};
-    get_wlan_config(&nvs_wifi_config);
-    ESP_ERROR_CHECK(connect(&nvs_wifi_config));
-     */
+        nvs_wifi_config_t nvs_wifi_config = {};
+        get_wlan_config(&nvs_wifi_config);
+        ESP_ERROR_CHECK(connect(&nvs_wifi_config));
+    */
 }
