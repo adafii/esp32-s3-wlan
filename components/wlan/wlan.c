@@ -22,7 +22,7 @@ typedef struct {
     const char* wpa_psk;
 } nvs_wifi_config_t;
 
-esp_err_t init();
+esp_err_t init_wifi();
 esp_err_t scan(wifi_ap_record_t** ap_records, uint16_t* ap_num);
 esp_err_t connect(const nvs_wifi_config_t* config);
 
@@ -51,7 +51,7 @@ char const* get_auth_type(wifi_auth_mode_t auth) {
 }
 
 // Init nvs and wifi
-esp_err_t init() {
+esp_err_t init_wifi() {
     esp_err_t nvs_error = nvs_flash_init();
 
     if (nvs_error == ESP_ERR_NVS_NO_FREE_PAGES || nvs_error == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -198,7 +198,7 @@ esp_err_t connect(const nvs_wifi_config_t* config) {
 }
 
 void test() {
-    ESP_ERROR_CHECK(init());
+    ESP_ERROR_CHECK(init_wifi());
 
     wifi_ap_record_t* ap_records = NULL;
     uint16_t ap_num = 0;

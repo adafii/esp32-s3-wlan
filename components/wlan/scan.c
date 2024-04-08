@@ -1,3 +1,4 @@
+#include "driver/gptimer.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -9,6 +10,9 @@
 #include <string.h>
 
 #define MAX_STATIONS_NUM 30
+#define CHANNEL_SCAN_TIME_MS 3000
+#define MIN_CHANNEL 1
+#define MAX_CHANNEL 11
 #define SNIFF_CHANNEL 5
 
 typedef struct {
@@ -25,8 +29,9 @@ typedef struct {
 static const char* TAG = "scan_beacons";
 static QueueHandle_t packet_queue;
 static station_records_t stations = {};
+static uint8_t current_channel = MIN_CHANNEL;
 
-esp_err_t init() {
+esp_err_t init_wifi() {
     esp_err_t nvs_error = nvs_flash_init();
 
     if (nvs_error == ESP_ERR_NVS_NO_FREE_PAGES || nvs_error == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -42,6 +47,34 @@ esp_err_t init() {
 
     return ESP_OK;
 };
+
+bool gptimer_alarm_cb(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* user_ctx) {
+    current_channel = current_channel == MAX_CHANNEL ? MIN_CHANNEL : current_channel + 1;
+    return false;
+};
+
+esp_err_t start_channel_timer() {
+    gptimer_handle_t gptimer = NULL;
+    gptimer_config_t timer_config = {
+        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
+        .direction = GPTIMER_COUNT_UP,
+        .resolution_hz = 1 * 1000 * 1000,
+    };
+
+    ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &gptimer));
+
+    gptimer_alarm_config_t alarm_config = {
+        .alarm_count = CHANNEL_SCAN_TIME_MS * 1000, .reload_count = 0, .flags.auto_reload_on_alarm = true};
+    ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &alarm_config));
+
+    gptimer_event_callbacks_t timer_cb = {.on_alarm = gptimer_alarm_cb};
+    ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &timer_cb, NULL));
+
+    ESP_ERROR_CHECK(gptimer_enable(gptimer));
+    ESP_ERROR_CHECK(gptimer_start(gptimer));
+
+    return ESP_OK;
+}
 
 void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
     packet_t received_packet = {};
@@ -74,6 +107,13 @@ bool is_same_bssid(uint8_t* bssid1, uint8_t* bssid2) {
     }
 
     return true;
+}
+
+void change_channel(void* user) {
+    for (;;) {
+        ESP_ERROR_CHECK(esp_wifi_set_channel(current_channel, 0));
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+    }
 }
 
 void save_station_data(void* user) {
@@ -109,17 +149,17 @@ void save_station_data(void* user) {
 
         bool is_already_recorded = false;
         for (uint32_t sta = 0; sta < stations.size; ++sta) {
-            if(is_same_bssid(bss.bssid, stations.data[sta].bssid)) {
+            if (is_same_bssid(bss.bssid, stations.data[sta].bssid)) {
                 is_already_recorded = true;
                 break;
             }
         }
 
-        if(is_already_recorded) {
+        if (is_already_recorded) {
             goto packet_cleanup;
         }
 
-        if(stations.size == MAX_STATIONS_NUM) {
+        if (stations.size == MAX_STATIONS_NUM) {
             ESP_LOGW(TAG, "Couldn't add new station: maximum number of stations recorded");
             goto packet_cleanup;
         }
@@ -127,7 +167,10 @@ void save_station_data(void* user) {
         memcpy(&stations.data[stations.size], &bss, sizeof(struct libwifi_bss));
         ++stations.size;
 
-        printf("stations: %lu\n", stations.size);
+        for (uint32_t sta = 0; sta < stations.size; ++sta) {
+            printf("%lu %s ", sta, stations.data[sta].ssid);
+        }
+        printf("\n");
 
     packet_cleanup:
         free(header);
@@ -136,20 +179,24 @@ void save_station_data(void* user) {
 }
 
 esp_err_t scan_beacons() {
-    ESP_ERROR_CHECK(init());
+    ESP_ERROR_CHECK(init_wifi());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     packet_queue = xQueueCreate(30, sizeof(packet_t));
     vQueueAddToRegistry(packet_queue, "Packet queue");
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
-    ESP_ERROR_CHECK(esp_wifi_set_channel(SNIFF_CHANNEL, 0));
 
     wifi_promiscuous_filter_t prom_filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT};
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&prom_filter));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
 
-    ESP_ERROR_CHECK(esp_wifi_set_channel(5, 0));
+    ESP_ERROR_CHECK(start_channel_timer());
+
+    if (xTaskCreatePinnedToCore(change_channel, "Changes wifi channel", 10 * 1024, NULL, 10, NULL, 1) != pdPASS) {
+        return ESP_FAIL;
+    }
 
     if (xTaskCreatePinnedToCore(save_station_data, "Saves station data", 10 * 1024, NULL, 10, NULL, 1) != pdPASS) {
         return ESP_FAIL;
