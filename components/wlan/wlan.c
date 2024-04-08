@@ -4,13 +4,13 @@
 #include "freertos/event_groups.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "libwifi.h"
 #include "nvs_flash.h"
 #include <stdio.h>
 #include <string.h>
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
-#define SNIFF_CHANNEL 5
 
 static int s_retry_num = 0;
 static EventGroupHandle_t s_wifi_event_group;
@@ -25,7 +25,6 @@ typedef struct {
 esp_err_t init();
 esp_err_t scan(wifi_ap_record_t** ap_records, uint16_t* ap_num);
 esp_err_t connect(const nvs_wifi_config_t* config);
-esp_err_t sniff();
 
 char const* get_auth_type(wifi_auth_mode_t auth);
 void print_ap_record(const wifi_ap_record_t ap_records[], const uint16_t* ap_num);
@@ -198,109 +197,14 @@ esp_err_t connect(const nvs_wifi_config_t* config) {
     return ESP_OK;
 }
 
-typedef struct {
-    wifi_promiscuous_pkt_type_t type;
-    wifi_pkt_rx_ctrl_t* header;
-    uint8_t* data;
-} packet_t;
-
-static QueueHandle_t packet_queue;
-
-void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
-    packet_t received_packet = {};
-
-    received_packet.type = type;
-    received_packet.header = malloc(sizeof(wifi_pkt_rx_ctrl_t));
-    memcpy(received_packet.header, buffer, sizeof(wifi_pkt_rx_ctrl_t));
-
-    uint32_t data_offset = sizeof(wifi_pkt_rx_ctrl_t);
-    size_t data_len = received_packet.header->sig_len;
-    if (data_len > 0) {
-        received_packet.data = malloc(data_len);
-        memcpy(received_packet.data, buffer + data_offset, data_len);
-    }
-
-    if (xQueueSendToBack(packet_queue, &received_packet, 0) != pdPASS) {
-        ESP_LOGW(TAG, "Queue full, packet dropped");
-    }
-}
-
-void print_packets_task(void* user) {
-    packet_t received_packet = {};
-    for (;;) {
-        if (xQueueReceive(packet_queue, &received_packet, 10) != pdPASS) {
-            continue;
-        }
-
-        switch (received_packet.type) {
-            case WIFI_PKT_MGMT:
-                printf("MGMT");
-                break;
-            case WIFI_PKT_CTRL:
-                printf("CTRL");
-                break;
-            case WIFI_PKT_DATA:
-                printf("DATA");
-                break;
-            case WIFI_PKT_MISC:
-                printf("MISC");
-                break;
-        }
-
-        wifi_pkt_rx_ctrl_t* header = received_packet.header;
-        printf(" - RSSI: %d, channel: %d, length: %d\n", header->rssi, header->channel, header->sig_len);
-        free(header);
-
-        uint8_t* data = received_packet.data;
-        size_t data_len = received_packet.header->sig_len;
-
-        for(size_t i = 0; i < data_len; ++i) {
-            char chr = (char)data[i];
-            if (chr > 32 && chr < 127) {
-                printf("%c", chr);
-            }
-        }
-
-        printf("\n");
-
-        free(data);
-    }
-}
-
-esp_err_t sniff() {
-    packet_queue = xQueueCreate(30, sizeof(packet_t));
-    vQueueAddToRegistry(packet_queue, "Packet queue");
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
-    ESP_ERROR_CHECK(esp_wifi_set_channel(SNIFF_CHANNEL, 0));
-
-    wifi_promiscuous_filter_t prom_filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_ALL};
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&prom_filter));
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_ctrl_filter(&prom_filter));
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
-
-    BaseType_t task_err = xTaskCreatePinnedToCore(print_packets_task, "Prints packets", 10 * 1024, NULL, 10, NULL, 1);
-
-    if (task_err != pdPASS) {
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
-}
-
 void test() {
     ESP_ERROR_CHECK(init());
 
-    /*
-        wifi_ap_record_t* ap_records = NULL;
-        uint16_t ap_num = 0;
-        ESP_ERROR_CHECK(scan(&ap_records, &ap_num));
-        print_ap_record(ap_records, &ap_num);
-        free(ap_records);
-    */
-
-    ESP_ERROR_CHECK(sniff());
+    wifi_ap_record_t* ap_records = NULL;
+    uint16_t ap_num = 0;
+    ESP_ERROR_CHECK(scan(&ap_records, &ap_num));
+    print_ap_record(ap_records, &ap_num);
+    free(ap_records);
 
     /*
         nvs_wifi_config_t nvs_wifi_config = {};

@@ -1,0 +1,3 @@
+[submodule "components/libwifi"]
+	path = components/libwifi
+	url = https://github.com/libwifi/libwifi.git

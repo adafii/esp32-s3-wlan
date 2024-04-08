@@ -1,6 +1,11 @@
 #pragma once
 
 /**
- * @brief Do random stuff with wlan - for now
+ * Test wifi functions
  */
 void test();
+
+/**
+ * Scan local wifi networks using data from beacons
+ */
+void scan_beacons();
