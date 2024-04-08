@@ -11,14 +11,20 @@
 #define MAX_STATIONS_NUM 30
 #define SNIFF_CHANNEL 5
 
-static const char* TAG = "scan_beacons";
-static QueueHandle_t packet_queue;
-
 typedef struct {
     wifi_promiscuous_pkt_type_t type;
     wifi_pkt_rx_ctrl_t* header;
     uint8_t* data;
 } packet_t;
+
+typedef struct {
+    struct libwifi_bss data[MAX_STATIONS_NUM];
+    uint32_t size;
+} station_records_t;
+
+static const char* TAG = "scan_beacons";
+static QueueHandle_t packet_queue;
+static station_records_t stations = {};
 
 esp_err_t init() {
     esp_err_t nvs_error = nvs_flash_init();
@@ -56,20 +62,34 @@ void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
     }
 }
 
-void print_packets_task(void* user) {
+bool is_same_bssid(uint8_t* bssid1, uint8_t* bssid2) {
+    if (!bssid1 || !bssid2) {
+        return false;
+    }
+
+    for (size_t i = 0; i < 6; ++i) {
+        if (bssid1[i] != bssid2[i]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void save_station_data(void* user) {
     packet_t received_packet = {};
     for (;;) {
         if (xQueueReceive(packet_queue, &received_packet, 10) != pdPASS) {
             continue;
         }
 
-        if (received_packet.type != WIFI_PKT_MGMT) {
-            continue;
-        }
-
         wifi_pkt_rx_ctrl_t* header = received_packet.header;
         uint8_t* data = received_packet.data;
         size_t data_len = received_packet.header->sig_len;
+
+        if (received_packet.type != WIFI_PKT_MGMT) {
+            goto packet_cleanup;
+        }
 
         struct libwifi_frame frame = {0};
         if (libwifi_get_wifi_frame(&frame, data, data_len, false)) {
@@ -87,10 +107,27 @@ void print_packets_task(void* user) {
             goto packet_cleanup;
         }
 
-        printf("ESSID: %s\n", bss.hidden ? "(hidden)" : bss.ssid);
-        printf("BSSID: " MACSTR "\n", MAC2STR(bss.bssid));
-        printf("Channel: %d\n", bss.channel);
-        printf("WPS: %s\n", bss.wps ? "Yes" : "No");
+        bool is_already_recorded = false;
+        for (uint32_t sta = 0; sta < stations.size; ++sta) {
+            if(is_same_bssid(bss.bssid, stations.data[sta].bssid)) {
+                is_already_recorded = true;
+                break;
+            }
+        }
+
+        if(is_already_recorded) {
+            goto packet_cleanup;
+        }
+
+        if(stations.size == MAX_STATIONS_NUM) {
+            ESP_LOGW(TAG, "Couldn't add new station: maximum number of stations recorded");
+            goto packet_cleanup;
+        }
+
+        memcpy(&stations.data[stations.size], &bss, sizeof(struct libwifi_bss));
+        ++stations.size;
+
+        printf("stations: %lu\n", stations.size);
 
     packet_cleanup:
         free(header);
@@ -112,9 +149,9 @@ esp_err_t scan_beacons() {
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
 
-    BaseType_t task_err = xTaskCreatePinnedToCore(print_packets_task, "Prints packets", 10 * 1024, NULL, 10, NULL, 1);
+    ESP_ERROR_CHECK(esp_wifi_set_channel(5, 0));
 
-    if (task_err != pdPASS) {
+    if (xTaskCreatePinnedToCore(save_station_data, "Saves station data", 10 * 1024, NULL, 10, NULL, 1) != pdPASS) {
         return ESP_FAIL;
     }
 
