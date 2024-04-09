@@ -10,12 +10,13 @@
 #include <string.h>
 
 #define MAX_STATIONS_NUM 30
-#define CHANNEL_SCAN_TIME_MS 3000
+#define PER_CHANNEL_SCAN_TIME_MS 1000
 #define MIN_CHANNEL 1
 #define MAX_CHANNEL 11
 
 #define SCAN_EVENT "scan_event"
 #define CHANNEL_CHANGE_EVENT 1
+#define NEW_STATION_EVENT 2
 
 typedef struct {
     wifi_promiscuous_pkt_type_t type;
@@ -27,6 +28,11 @@ typedef struct {
     struct libwifi_bss data[MAX_STATIONS_NUM];
     uint32_t size;
 } station_records_t;
+
+typedef struct {
+    int8_t len;
+    char const* title;
+} column_t;
 
 static const char* TAG = "scan_beacons";
 static QueueHandle_t packet_queue;
@@ -64,17 +70,44 @@ esp_err_t init_event_loops() {
     return ESP_OK;
 }
 
-bool gptimer_alarm_cb(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* user_ctx) {
-    BaseType_t task_unblocked = pdFALSE;
-    esp_event_isr_post_to(scan_loop_handle, SCAN_EVENT, CHANNEL_CHANGE_EVENT, NULL, 0, &task_unblocked);
-    return task_unblocked;
-};
-
 void channel_change_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     static uint8_t current_channel = MIN_CHANNEL;
     current_channel = (current_channel - MIN_CHANNEL + 1) % (MAX_CHANNEL - MIN_CHANNEL + 1) + MIN_CHANNEL;
     ESP_ERROR_CHECK(esp_wifi_set_channel(current_channel, 0));
 }
+
+void new_station_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    static const column_t columns[] = {{5, "rssi"}, {6 * 3 - 1 + 2, "bssid"}, {32, "ssid"}, {9, "channel"},
+                                       {5, "wps"},  {15, "encryption"}};
+    static bool has_header = false;
+
+    if (!has_header) {
+        for (int i = 0; i < sizeof(columns) / sizeof(column_t); ++i) {
+            printf("%*s", columns[i].len, columns[i].title);
+        }
+        printf("\n");
+        has_header = true;
+    }
+
+    struct libwifi_bss* station = event_data;
+    char security_buffer[LIBWIFI_SECURITY_BUF_LEN];
+    libwifi_get_security_type(station, security_buffer);
+
+    printf("%*d", columns[0].len, station->signal);
+    printf("  %.2x:%.2x:%.2x:%.2x:%.2x:%.2x", station->bssid[0], station->bssid[1], station->bssid[2],
+           station->bssid[3], station->bssid[4], station->bssid[5]);
+    printf("%*.*s", columns[2].len, columns[2].len, station->hidden ? "<hidden>" : station->ssid);
+    printf("%*d", columns[3].len, station->channel);
+    printf("%*s", columns[4].len, station->wps ? "Yes" : "No");
+    printf("%*.*s", columns[5].len, columns[5].len, security_buffer);
+    printf("\n");
+}
+
+bool gptimer_alarm_cb(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* user_ctx) {
+    BaseType_t task_unblocked = pdFALSE;
+    esp_event_isr_post_to(scan_loop_handle, SCAN_EVENT, CHANNEL_CHANGE_EVENT, NULL, 0, &task_unblocked);
+    return task_unblocked;
+};
 
 esp_err_t start_channel_change_timer() {
     gptimer_handle_t gptimer = NULL;
@@ -87,7 +120,7 @@ esp_err_t start_channel_change_timer() {
     ESP_ERROR_CHECK(gptimer_new_timer(&timer_config, &gptimer));
 
     gptimer_alarm_config_t alarm_config = {
-        .alarm_count = CHANNEL_SCAN_TIME_MS * 1000, .reload_count = 0, .flags.auto_reload_on_alarm = true};
+        .alarm_count = PER_CHANNEL_SCAN_TIME_MS * 1000, .reload_count = 0, .flags.auto_reload_on_alarm = true};
     ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &alarm_config));
 
     gptimer_event_callbacks_t timer_cb = {.on_alarm = gptimer_alarm_cb};
@@ -131,10 +164,10 @@ bool is_same_bssid(const uint8_t* bssid1, const uint8_t* bssid2) {
     return true;
 }
 
-void save_station_data(void* user) {
+void save_station_task(void* user) {
     packet_t received_packet = {};
     for (;;) {
-        if (xQueueReceive(packet_queue, &received_packet, 10) != pdPASS) {
+        if (xQueueReceive(packet_queue, &received_packet, 100) != pdPASS) {
             continue;
         }
 
@@ -151,61 +184,63 @@ void save_station_data(void* user) {
         }
 
         if (frame.frame_control.subtype != SUBTYPE_BEACON) {
+            libwifi_free_wifi_frame(&frame);
             continue;
         }
 
         struct libwifi_bss bss = {0};
         if (libwifi_parse_beacon(&bss, &frame)) {
             ESP_LOGE(TAG, "Could not parse beacon");
+            libwifi_free_wifi_frame(&frame);
             continue;
         }
 
         bool is_already_recorded = false;
-        for (uint32_t sta = 0; sta < stations.size; ++sta) {
-            if (is_same_bssid(bss.bssid, stations.data[sta].bssid)) {
+        for (uint32_t station = 0; station < stations.size; ++station) {
+            if (is_same_bssid(bss.bssid, stations.data[station].bssid)) {
                 is_already_recorded = true;
                 break;
             }
         }
 
-        if (is_already_recorded) {
-            continue;
+        if (!is_already_recorded && stations.size <= MAX_STATIONS_NUM) {
+            memcpy(&stations.data[stations.size], &bss, sizeof(struct libwifi_bss));
+            esp_event_post_to(scan_loop_handle, SCAN_EVENT, NEW_STATION_EVENT, &stations.data[stations.size],
+                              sizeof(struct libwifi_bss), 100);
+            ++stations.size;
         }
 
-        if (stations.size == MAX_STATIONS_NUM) {
-            ESP_LOGW(TAG, "Couldn't add new station: maximum number of stations recorded");
-            continue;
-        }
-
-        memcpy(&stations.data[stations.size], &bss, sizeof(struct libwifi_bss));
-        ++stations.size;
-
-        for (uint32_t sta = 0; sta < stations.size; ++sta) {
-            printf("%lu %s ", sta, stations.data[sta].ssid);
-        }
-        printf("\n");
+        libwifi_free_bss(&bss);
+        libwifi_free_wifi_frame(&frame);
     }
 }
 
-esp_err_t scan_beacons() {
-    ESP_ERROR_CHECK(init_wifi());
-
-    packet_queue = xQueueCreate(30, sizeof(packet_t));
-    vQueueAddToRegistry(packet_queue, "Packet queue");
-
-    init_event_loops();
-    esp_event_handler_instance_register_with(scan_loop_handle, SCAN_EVENT, CHANNEL_CHANGE_EVENT, channel_change_handler,
-                                             NULL, NULL);
-
+esp_err_t init_promiscuous_mode() {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
     wifi_promiscuous_filter_t prom_filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT};
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&prom_filter));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
 
+    return ESP_OK;
+}
+
+esp_err_t scan_beacons() {
+    ESP_ERROR_CHECK(init_event_loops());
+    ESP_ERROR_CHECK(esp_event_handler_instance_register_with(scan_loop_handle, SCAN_EVENT, CHANNEL_CHANGE_EVENT,
+                                                             channel_change_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register_with(scan_loop_handle, SCAN_EVENT, NEW_STATION_EVENT,
+                                                             new_station_handler, NULL, NULL));
+
+    ESP_ERROR_CHECK(init_wifi());
+
+    packet_queue = xQueueCreate(30, sizeof(packet_t));
+    vQueueAddToRegistry(packet_queue, "Packet queue");
+
+    ESP_ERROR_CHECK(init_promiscuous_mode());
     ESP_ERROR_CHECK(start_channel_change_timer());
 
-    if (xTaskCreatePinnedToCore(save_station_data, "Saves station data", 10 * 1024, NULL, 10, NULL, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCore(save_station_task, "Saves station data", 10 * 1024, NULL, 10, NULL, 1) != pdPASS) {
         return ESP_FAIL;
     }
 
