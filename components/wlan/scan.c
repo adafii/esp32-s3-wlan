@@ -17,8 +17,8 @@
 
 typedef struct {
     wifi_promiscuous_pkt_type_t type;
-    wifi_pkt_rx_ctrl_t* header;
-    uint8_t* data;
+    size_t data_size;
+    uint8_t data[512];
 } packet_t;
 
 typedef struct {
@@ -80,22 +80,21 @@ void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
     packet_t received_packet = {};
 
     received_packet.type = type;
-    received_packet.header = malloc(sizeof(wifi_pkt_rx_ctrl_t));
-    memcpy(received_packet.header, buffer, sizeof(wifi_pkt_rx_ctrl_t));
+    received_packet.data_size = ((wifi_pkt_rx_ctrl_t*)(buffer))->sig_len;
 
-    uint32_t data_offset = sizeof(wifi_pkt_rx_ctrl_t);
-    size_t data_len = received_packet.header->sig_len;
-    if (data_len > 0) {
-        received_packet.data = malloc(data_len);
-        memcpy(received_packet.data, buffer + data_offset, data_len);
+    if(received_packet.data_size == 0 || received_packet.data_size > 512) {
+        ESP_LOGW(TAG, "Packet data size was %d -> skipped", received_packet.data_size);
+        return;
     }
 
+    memcpy(received_packet.data, (uint8_t*)(buffer) + sizeof(wifi_pkt_rx_ctrl_t), received_packet.data_size);
+
     if (xQueueSendToBack(packet_queue, &received_packet, 0) != pdPASS) {
-        ESP_LOGW(TAG, "Queue full, packet dropped");
+        ESP_LOGW(TAG, "Packet queue is full, packet dropped");
     }
 }
 
-bool is_same_bssid(uint8_t* bssid1, uint8_t* bssid2) {
+bool is_same_bssid(const uint8_t* bssid1, const uint8_t* bssid2) {
     if (!bssid1 || !bssid2) {
         return false;
     }
@@ -123,28 +122,26 @@ void save_station_data(void* user) {
             continue;
         }
 
-        wifi_pkt_rx_ctrl_t* header = received_packet.header;
         uint8_t* data = received_packet.data;
-        size_t data_len = received_packet.header->sig_len;
 
         if (received_packet.type != WIFI_PKT_MGMT) {
-            goto packet_cleanup;
+            continue;
         }
 
         struct libwifi_frame frame = {0};
-        if (libwifi_get_wifi_frame(&frame, data, data_len, false)) {
+        if (libwifi_get_wifi_frame(&frame, data, received_packet.data_size, false)) {
             ESP_LOGE(TAG, "Could not parse wifi frame");
-            goto packet_cleanup;
+            continue;
         }
 
         if (frame.frame_control.subtype != SUBTYPE_BEACON) {
-            goto packet_cleanup;
+            continue;
         }
 
         struct libwifi_bss bss = {0};
         if (libwifi_parse_beacon(&bss, &frame)) {
             ESP_LOGE(TAG, "Could not parse beacon");
-            goto packet_cleanup;
+            continue;
         }
 
         bool is_already_recorded = false;
@@ -156,12 +153,12 @@ void save_station_data(void* user) {
         }
 
         if (is_already_recorded) {
-            goto packet_cleanup;
+            continue;
         }
 
         if (stations.size == MAX_STATIONS_NUM) {
             ESP_LOGW(TAG, "Couldn't add new station: maximum number of stations recorded");
-            goto packet_cleanup;
+            continue;
         }
 
         memcpy(&stations.data[stations.size], &bss, sizeof(struct libwifi_bss));
@@ -171,10 +168,6 @@ void save_station_data(void* user) {
             printf("%lu %s ", sta, stations.data[sta].ssid);
         }
         printf("\n");
-
-    packet_cleanup:
-        free(header);
-        free(data);
     }
 }
 
