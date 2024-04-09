@@ -13,7 +13,9 @@
 #define CHANNEL_SCAN_TIME_MS 3000
 #define MIN_CHANNEL 1
 #define MAX_CHANNEL 11
-#define SNIFF_CHANNEL 5
+
+#define SCAN_EVENT "scan_event"
+#define CHANNEL_CHANGE_EVENT 1
 
 typedef struct {
     wifi_promiscuous_pkt_type_t type;
@@ -29,7 +31,7 @@ typedef struct {
 static const char* TAG = "scan_beacons";
 static QueueHandle_t packet_queue;
 static station_records_t stations = {};
-static uint8_t current_channel = MIN_CHANNEL;
+static esp_event_loop_handle_t scan_loop_handle;
 
 esp_err_t init_wifi() {
     esp_err_t nvs_error = nvs_flash_init();
@@ -48,12 +50,33 @@ esp_err_t init_wifi() {
     return ESP_OK;
 };
 
+esp_err_t init_event_loops() {
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    esp_event_loop_args_t event_loop_args = {.queue_size = 10,
+                                             .task_name = "Scan event loop",
+                                             .task_priority = 10,
+                                             .task_stack_size = 10 * 1024,
+                                             .task_core_id = 1};
+
+    ESP_ERROR_CHECK(esp_event_loop_create(&event_loop_args, &scan_loop_handle));
+
+    return ESP_OK;
+}
+
 bool gptimer_alarm_cb(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* user_ctx) {
-    current_channel = current_channel == MAX_CHANNEL ? MIN_CHANNEL : current_channel + 1;
-    return false;
+    BaseType_t task_unblocked = pdFALSE;
+    esp_event_isr_post_to(scan_loop_handle, SCAN_EVENT, CHANNEL_CHANGE_EVENT, NULL, 0, &task_unblocked);
+    return task_unblocked;
 };
 
-esp_err_t start_channel_timer() {
+void channel_change_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    static uint8_t current_channel = MIN_CHANNEL;
+    current_channel = (current_channel - MIN_CHANNEL + 1) % (MAX_CHANNEL - MIN_CHANNEL + 1) + MIN_CHANNEL;
+    ESP_ERROR_CHECK(esp_wifi_set_channel(current_channel, 0));
+}
+
+esp_err_t start_channel_change_timer() {
     gptimer_handle_t gptimer = NULL;
     gptimer_config_t timer_config = {
         .clk_src = GPTIMER_CLK_SRC_DEFAULT,
@@ -82,7 +105,7 @@ void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
     received_packet.type = type;
     received_packet.data_size = ((wifi_pkt_rx_ctrl_t*)(buffer))->sig_len;
 
-    if(received_packet.data_size == 0 || received_packet.data_size > 512) {
+    if (received_packet.data_size == 0 || received_packet.data_size > 512) {
         ESP_LOGW(TAG, "Packet data size was %d -> skipped", received_packet.data_size);
         return;
     }
@@ -106,13 +129,6 @@ bool is_same_bssid(const uint8_t* bssid1, const uint8_t* bssid2) {
     }
 
     return true;
-}
-
-void change_channel(void* user) {
-    for (;;) {
-        ESP_ERROR_CHECK(esp_wifi_set_channel(current_channel, 0));
-        vTaskDelay(500 / portTICK_PERIOD_MS);
-    }
 }
 
 void save_station_data(void* user) {
@@ -173,23 +189,21 @@ void save_station_data(void* user) {
 
 esp_err_t scan_beacons() {
     ESP_ERROR_CHECK(init_wifi());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     packet_queue = xQueueCreate(30, sizeof(packet_t));
     vQueueAddToRegistry(packet_queue, "Packet queue");
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
+    init_event_loops();
+    esp_event_handler_instance_register_with(scan_loop_handle, SCAN_EVENT, CHANNEL_CHANGE_EVENT, channel_change_handler,
+                                             NULL, NULL);
 
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_NULL));
     wifi_promiscuous_filter_t prom_filter = {.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT};
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&prom_filter));
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
 
-    ESP_ERROR_CHECK(start_channel_timer());
-
-    if (xTaskCreatePinnedToCore(change_channel, "Changes wifi channel", 10 * 1024, NULL, 10, NULL, 1) != pdPASS) {
-        return ESP_FAIL;
-    }
+    ESP_ERROR_CHECK(start_channel_change_timer());
 
     if (xTaskCreatePinnedToCore(save_station_data, "Saves station data", 10 * 1024, NULL, 10, NULL, 1) != pdPASS) {
         return ESP_FAIL;
