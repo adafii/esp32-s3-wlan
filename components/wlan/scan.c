@@ -18,11 +18,9 @@
 #define CHANNEL_CHANGE_EVENT 1
 #define NEW_STATION_EVENT 2
 
-typedef struct {
-    wifi_promiscuous_pkt_type_t type;
-    size_t data_size;
-    uint8_t data[512];
-} packet_t;
+#define BUFFER_SIZE 600
+
+typedef uint8_t packet_t[BUFFER_SIZE];
 
 typedef struct {
     struct libwifi_bss data[MAX_STATIONS_NUM];
@@ -133,19 +131,14 @@ esp_err_t start_channel_change_timer() {
 }
 
 void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
-    packet_t received_packet = {};
+    size_t buffer_size = ((wifi_pkt_rx_ctrl_t*)(buffer))->sig_len + sizeof(wifi_pkt_rx_ctrl_t);
 
-    received_packet.type = type;
-    received_packet.data_size = ((wifi_pkt_rx_ctrl_t*)(buffer))->sig_len;
-
-    if (received_packet.data_size == 0 || received_packet.data_size > 512) {
-        ESP_LOGW(TAG, "Packet data size was %d -> skipped", received_packet.data_size);
+    if (buffer_size > sizeof(packet_t)) {
+        ESP_LOGW(TAG, "Buffer size was larger than packet_t size (%d > %d) -> skipped", buffer_size, sizeof(packet_t));
         return;
     }
 
-    memcpy(received_packet.data, (uint8_t*)(buffer) + sizeof(wifi_pkt_rx_ctrl_t), received_packet.data_size);
-
-    if (xQueueSendToBack(packet_queue, &received_packet, 0) != pdPASS) {
+    if (xQueueSendToBack(packet_queue, (packet_t*)buffer, 100) != pdPASS) {
         ESP_LOGW(TAG, "Packet queue is full, packet dropped");
     }
 }
@@ -166,19 +159,18 @@ bool is_same_bssid(const uint8_t* bssid1, const uint8_t* bssid2) {
 
 void save_station_task(void* user) {
     packet_t received_packet = {};
+
     for (;;) {
         if (xQueueReceive(packet_queue, &received_packet, 100) != pdPASS) {
             continue;
         }
 
-        uint8_t* data = received_packet.data;
-
-        if (received_packet.type != WIFI_PKT_MGMT) {
-            continue;
-        }
+        wifi_pkt_rx_ctrl_t* header = (wifi_pkt_rx_ctrl_t*)received_packet;
+        size_t data_size = header->sig_len;
+        uint8_t* data = received_packet + sizeof(wifi_pkt_rx_ctrl_t);
 
         struct libwifi_frame frame = {0};
-        if (libwifi_get_wifi_frame(&frame, data, received_packet.data_size, false)) {
+        if (libwifi_get_wifi_frame(&frame, data, data_size, false)) {
             ESP_LOGE(TAG, "Could not parse wifi frame");
             continue;
         }
@@ -199,11 +191,13 @@ void save_station_task(void* user) {
         for (uint32_t station = 0; station < stations.size; ++station) {
             if (is_same_bssid(bss.bssid, stations.data[station].bssid)) {
                 is_already_recorded = true;
+                stations.data[station].signal = header->rssi;
                 break;
             }
         }
 
         if (!is_already_recorded && stations.size <= MAX_STATIONS_NUM) {
+            bss.signal = header->rssi;
             memcpy(&stations.data[stations.size], &bss, sizeof(struct libwifi_bss));
             esp_event_post_to(scan_loop_handle, SCAN_EVENT, NEW_STATION_EVENT, &stations.data[stations.size],
                               sizeof(struct libwifi_bss), 100);
