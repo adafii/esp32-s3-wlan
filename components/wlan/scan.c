@@ -18,19 +18,19 @@
 #define CHANNEL_CHANGE_EVENT 1
 #define NEW_STATION_EVENT 2
 
-#define BUFFER_SIZE 600
+#define PACKET_BUFFER_SIZE 600
+#define PACKET_QUEUE_SIZE 30
+#define DEFAULT_TASK_STACK_SIZE (10 * 1024)
+#define DEFAULT_TASK_PRIORITY 10
+#define QUEUE_WAIT_TICKS 100
+#define EVENT_LOOP_QUEUE_SIZE 10
 
-typedef uint8_t packet_t[BUFFER_SIZE];
+typedef uint8_t packet_t[PACKET_BUFFER_SIZE];
 
 typedef struct {
     struct libwifi_bss data[MAX_STATIONS_NUM];
     uint32_t size;
 } station_records_t;
-
-typedef struct {
-    int8_t len;
-    char const* title;
-} column_t;
 
 static const char* TAG = "scan_beacons";
 static QueueHandle_t packet_queue;
@@ -57,11 +57,11 @@ esp_err_t init_wifi() {
 esp_err_t init_event_loops() {
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    esp_event_loop_args_t event_loop_args = {.queue_size = 10,
+    esp_event_loop_args_t event_loop_args = {.queue_size = EVENT_LOOP_QUEUE_SIZE,
                                              .task_name = "Scan event loop",
-                                             .task_priority = 10,
-                                             .task_stack_size = 10 * 1024,
-                                             .task_core_id = 1};
+                                             .task_priority = DEFAULT_TASK_PRIORITY,
+                                             .task_stack_size = DEFAULT_TASK_STACK_SIZE,
+                                             .task_core_id = APP_CPU_NUM};
 
     ESP_ERROR_CHECK(esp_event_loop_create(&event_loop_args, &scan_loop_handle));
 
@@ -75,6 +75,11 @@ void channel_change_handler(void* event_handler_arg, esp_event_base_t event_base
 }
 
 void new_station_handler(void* event_handler_arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+    typedef struct {
+        int8_t len;
+        char const* title;
+    } column_t;
+
     static const column_t columns[] = {{5, "rssi"}, {6 * 3 - 1 + 2, "bssid"}, {32, "ssid"}, {9, "channel"},
                                        {5, "wps"},  {15, "encryption"}};
     static bool has_header = false;
@@ -138,7 +143,7 @@ void wifi_promiscuous_cb(void* buffer, wifi_promiscuous_pkt_type_t type) {
         return;
     }
 
-    if (xQueueSendToBack(packet_queue, (packet_t*)buffer, 100) != pdPASS) {
+    if (xQueueSendToBack(packet_queue, (packet_t*)buffer, QUEUE_WAIT_TICKS) != pdPASS) {
         ESP_LOGW(TAG, "Packet queue is full, packet dropped");
     }
 }
@@ -161,7 +166,7 @@ void save_station_task(void* user) {
     packet_t received_packet = {};
 
     for (;;) {
-        if (xQueueReceive(packet_queue, &received_packet, 100) != pdPASS) {
+        if (xQueueReceive(packet_queue, &received_packet, QUEUE_WAIT_TICKS) != pdPASS) {
             continue;
         }
 
@@ -191,16 +196,15 @@ void save_station_task(void* user) {
         for (uint32_t station = 0; station < stations.size; ++station) {
             if (is_same_bssid(bss.bssid, stations.data[station].bssid)) {
                 is_already_recorded = true;
-                stations.data[station].signal = header->rssi;
                 break;
             }
         }
 
-        if (!is_already_recorded && stations.size <= MAX_STATIONS_NUM) {
+        if (!is_already_recorded && stations.size < MAX_STATIONS_NUM) {
             bss.signal = header->rssi;
             memcpy(&stations.data[stations.size], &bss, sizeof(struct libwifi_bss));
             esp_event_post_to(scan_loop_handle, SCAN_EVENT, NEW_STATION_EVENT, &stations.data[stations.size],
-                              sizeof(struct libwifi_bss), 100);
+                              sizeof(struct libwifi_bss), QUEUE_WAIT_TICKS);
             ++stations.size;
         }
 
@@ -228,13 +232,14 @@ esp_err_t scan_beacons() {
 
     ESP_ERROR_CHECK(init_wifi());
 
-    packet_queue = xQueueCreate(30, sizeof(packet_t));
+    packet_queue = xQueueCreate(PACKET_QUEUE_SIZE, sizeof(packet_t));
     vQueueAddToRegistry(packet_queue, "Packet queue");
 
     ESP_ERROR_CHECK(init_promiscuous_mode());
     ESP_ERROR_CHECK(start_channel_change_timer());
 
-    if (xTaskCreatePinnedToCore(save_station_task, "Saves station data", 10 * 1024, NULL, 10, NULL, 1) != pdPASS) {
+    if (xTaskCreatePinnedToCore(save_station_task, "Saves station data", DEFAULT_TASK_STACK_SIZE, NULL,
+                                DEFAULT_TASK_PRIORITY, NULL, APP_CPU_NUM) != pdPASS) {
         return ESP_FAIL;
     }
 
